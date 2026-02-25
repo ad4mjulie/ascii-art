@@ -27,7 +27,7 @@ import sys
 import datetime
 
 try:
-    from PIL import Image, ImageEnhance, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 except ImportError:
     print("Error: Pillow is not installed. Run: pip install Pillow")
     sys.exit(1)
@@ -55,6 +55,18 @@ DEFAULT_WIDTH = 100
 # Preprocessing strengths (1.0 = no change)
 CONTRAST_FACTOR  = 1.5   # boost contrast so dark/light areas are more distinct
 SHARPNESS_FACTOR = 2.0   # accentuate edges and fine details
+
+# Font size (pixels) used when rendering ASCII art to a JPG image.
+FONT_SIZE = 12
+
+# Monospace font candidates searched in order (cross-platform).
+_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Menlo.ttc",            # macOS
+    "/System/Library/Fonts/Monaco.ttf",            # older macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",  # Linux
+    "C:/Windows/Fonts/consola.ttf",               # Windows
+    "C:/Windows/Fonts/cour.ttf",                  # Windows fallback
+]
 
 # Folder (relative to this script) where outputs are auto-saved.
 RECEIVED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "received")
@@ -90,8 +102,93 @@ def build_auto_save_path(image_path: str) -> str:
     """
     base_name  = os.path.splitext(os.path.basename(image_path))[0]  # e.g. IMG_8157
     timestamp  = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    file_name  = f"{base_name}_{timestamp}.txt"
+    file_name  = f"{base_name}_{timestamp}.jpg"
     return os.path.join(RECEIVED_DIR, file_name)
+
+
+def _load_mono_font() -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
+    """
+    Load the best available monospace font for image rendering.
+    Falls back to Pillow's built-in bitmap font if none is found.
+    """
+    for path in _FONT_CANDIDATES:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, FONT_SIZE)
+            except Exception:
+                pass
+    # Built-in fallback — always available, but very small
+    return ImageFont.load_default()
+
+
+def save_ascii_as_image(rows: list[str], output_path: str) -> None:
+    """
+    Render the ASCII art rows onto a black JPG image.
+
+    Plain rows → white-on-black text.
+    Colored rows (containing ANSI codes) → each character is drawn in its
+    original sampled color on a black background.
+
+    Parameters
+    ----------
+    rows : list[str]
+        Lines of ASCII characters (may contain ANSI escape codes).
+    output_path : str
+        Destination .jpg file path.
+    """
+    import re
+
+    ansi_escape  = re.compile(r"\033\[[0-9;]*m")
+    color_pattern = re.compile(r"\033\[38;2;(\d+);(\d+);(\d+)m(.)\033\[0m")
+    has_color = any("\033" in row for row in rows)
+
+    font     = _load_mono_font()
+    # Measure one character so we can size the canvas correctly
+    dummy    = Image.new("RGB", (1, 1))
+    bbox     = ImageDraw.Draw(dummy).textbbox((0, 0), "M", font=font)
+    char_w   = bbox[2] - bbox[0]
+    char_h   = bbox[3] - bbox[1] + 1   # +1 for a touch of line spacing
+
+    padding   = 6
+    max_cols  = max((len(ansi_escape.sub("", r)) for r in rows), default=1)
+    img_w     = max_cols * char_w + padding * 2
+    img_h     = len(rows) * char_h  + padding * 2
+
+    canvas = Image.new("RGB", (img_w, img_h), color=(10, 10, 10))
+    draw   = ImageDraw.Draw(canvas)
+
+    for row_idx, row in enumerate(rows):
+        y = padding + row_idx * char_h
+
+        if has_color:
+            # --- Draw character-by-character with original colors -----------
+            x   = padding
+            pos = 0
+            while pos < len(row):
+                m = color_pattern.match(row, pos)
+                if m:
+                    r, g, b, char = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+                    draw.text((x, y), char, fill=(r, g, b), font=font)
+                    x   += char_w
+                    pos  = m.end()
+                elif row[pos] == "\033":
+                    # Skip any remaining escape sequences
+                    end = row.find("m", pos)
+                    pos = end + 1 if end != -1 else pos + 1
+                else:
+                    draw.text((x, y), row[pos], fill=(200, 200, 200), font=font)
+                    x   += char_w
+                    pos += 1
+        else:
+            # --- Draw the whole plain row at once (much faster) -------------
+            clean = ansi_escape.sub("", row)
+            draw.text((padding, y), clean, fill=(210, 210, 210), font=font)
+
+    try:
+        canvas.save(output_path, "JPEG", quality=95)
+        print(f"\nASCII art image saved to: {output_path}")
+    except OSError as exc:
+        print(f"Error: Could not write image — {exc}")
 
 
 def preprocess_image(img: Image.Image) -> Image.Image:
@@ -480,14 +577,14 @@ def main() -> None:
     # --- Step 6: Print to terminal -------------------------------------------
     print_ascii(rows)
 
-    # --- Step 7: Always auto-save to received/ folder -----------------------
+    # --- Step 7: Always auto-save as JPG to received/ folder ----------------
     ensure_received_dir()
     auto_path = build_auto_save_path(args.image)
-    save_ascii(rows, auto_path)
+    save_ascii_as_image(rows, auto_path)
 
-    # --- Step 8: Optionally save to an extra user-specified file -------------
+    # --- Step 8: Optionally save an extra JPG to a user-specified path ------
     if args.output:
-        save_ascii(rows, args.output)
+        save_ascii_as_image(rows, args.output)
 
 
 # ---------------------------------------------------------------------------
