@@ -24,6 +24,7 @@ Requires:
 import argparse
 import os
 import sys
+import datetime
 
 try:
     from PIL import Image
@@ -46,10 +47,43 @@ DEFAULT_CHARS = "@%#*+=-:. "
 # looking proportional in the terminal.
 CHAR_ASPECT_RATIO = 0.45
 
+# Folder (relative to this script) where outputs are auto-saved.
+RECEIVED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "received")
+
 
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
+
+def ensure_received_dir() -> None:
+    """
+    Create the 'received' output directory next to this script if it does not
+    already exist.
+    """
+    os.makedirs(RECEIVED_DIR, exist_ok=True)
+
+
+def build_auto_save_path(image_path: str) -> str:
+    """
+    Build a unique save path inside RECEIVED_DIR based on the input image
+    filename and the current timestamp.
+
+    Parameters
+    ----------
+    image_path : str
+        Path to the original input image.
+
+    Returns
+    -------
+    str
+        Full path for the auto-saved .txt file, e.g.:
+        /path/to/ascii_art/received/IMG_8157_2026-02-25_07-26-40.txt
+    """
+    base_name  = os.path.splitext(os.path.basename(image_path))[0]  # e.g. IMG_8157
+    timestamp  = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    file_name  = f"{base_name}_{timestamp}.txt"
+    return os.path.join(RECEIVED_DIR, file_name)
+
 
 def load_image(path: str) -> Image.Image:
     """
@@ -404,7 +438,12 @@ def main() -> None:
     # --- Step 6: Print to terminal -------------------------------------------
     print_ascii(rows)
 
-    # --- Step 7: Optionally save to file -------------------------------------
+    # --- Step 7: Always auto-save to received/ folder -----------------------
+    ensure_received_dir()
+    auto_path = build_auto_save_path(args.image)
+    save_ascii(rows, auto_path)
+
+    # --- Step 8: Optionally save to an extra user-specified file -------------
     if args.output:
         save_ascii(rows, args.output)
 
