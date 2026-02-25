@@ -27,7 +27,7 @@ import sys
 import datetime
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter
 except ImportError:
     print("Error: Pillow is not installed. Run: pip install Pillow")
     sys.exit(1)
@@ -37,15 +37,24 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Default ASCII character set — ordered from darkest (leftmost) to lightest.
-# The rightmost character (space) represents the brightest pixels.
-DEFAULT_CHARS = "@%#*+=-:. "
+# 70-character gradient — far more brightness levels than the old 10-char set.
+# Ordered darkest → lightest; the extra resolution reveals subtle textures.
+DEFAULT_CHARS = (
+    "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+)
 
 # Terminal character aspect ratio correction factor.
 # Most monospace fonts are roughly twice as tall as they are wide,
 # so we multiply the calculated height by this factor to keep the image
 # looking proportional in the terminal.
 CHAR_ASPECT_RATIO = 0.45
+
+# Default output width in characters. Higher = more horizontal detail.
+DEFAULT_WIDTH = 200
+
+# Preprocessing strengths (1.0 = no change)
+CONTRAST_FACTOR  = 1.5   # boost contrast so dark/light areas are more distinct
+SHARPNESS_FACTOR = 2.0   # accentuate edges and fine details
 
 # Folder (relative to this script) where outputs are auto-saved.
 RECEIVED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "received")
@@ -83,6 +92,35 @@ def build_auto_save_path(image_path: str) -> str:
     timestamp  = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_name  = f"{base_name}_{timestamp}.txt"
     return os.path.join(RECEIVED_DIR, file_name)
+
+
+def preprocess_image(img: Image.Image) -> Image.Image:
+    """
+    Enhance the image before ASCII conversion to bring out more detail.
+
+    Steps
+    -----
+    1. Sharpen edges with an unsharp-mask filter.
+    2. Boost contrast so the brightness range is wider, giving more distinct
+       mapping across the ASCII character set.
+
+    Parameters
+    ----------
+    img : PIL.Image.Image
+        The source (resized) image.
+
+    Returns
+    -------
+    PIL.Image.Image
+        The pre-processed image.
+    """
+    # Unsharp mask: radius=2, percent=150, threshold=3
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    # Contrast boost
+    img = ImageEnhance.Contrast(img).enhance(CONTRAST_FACTOR)
+    # Sharpness boost
+    img = ImageEnhance.Sharpness(img).enhance(SHARPNESS_FACTOR)
+    return img
 
 
 def load_image(path: str) -> Image.Image:
@@ -363,8 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--width", "-w",
         type=int,
-        default=100,
-        help="Output width in characters (default: 100).",
+        default=DEFAULT_WIDTH,
+        help=f"Output width in characters (default: {DEFAULT_WIDTH}).",
     )
     parser.add_argument(
         "--chars", "-c",
@@ -423,6 +461,10 @@ def main() -> None:
     # --- Step 3: Resize -------------------------------------------------------
     print(f"Resizing to width={args.width} characters …")
     resized = resize_image(img, args.width)
+
+    # --- Step 3b: Preprocess for detail --------------------------------------
+    print("Enhancing detail (sharpness + contrast) …")
+    resized = preprocess_image(resized)
 
     # --- Step 4: Grayscale conversion ----------------------------------------
     gray = to_grayscale(resized)
