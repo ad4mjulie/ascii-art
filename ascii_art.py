@@ -49,8 +49,8 @@ DEFAULT_CHARS = (
 # looking proportional in the terminal.
 CHAR_ASPECT_RATIO = 0.45
 
-# Default output width in characters. Higher = more horizontal detail.
-DEFAULT_WIDTH = 200
+# Default output width in characters (fits most terminals without scrolling).
+DEFAULT_WIDTH = 100
 
 # Preprocessing strengths (1.0 = no change)
 CONTRAST_FACTOR  = 1.5   # boost contrast so dark/light areas are more distinct
