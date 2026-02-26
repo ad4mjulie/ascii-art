@@ -27,7 +27,7 @@ import sys
 import datetime
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps
 except ImportError:
     print("Error: Pillow is not installed. Run: pip install Pillow")
     sys.exit(1)
@@ -37,9 +37,9 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-# 70-character gradient — far more brightness levels than the old 10-char set.
-# Ordered darkest → lightest; the extra resolution reveals subtle textures.
-DEFAULT_CHARS = (
+# Candidate characters for the ASCII gradient — will be sorted by measured
+# ink-density at import time so the ramp matches the actual rendering font.
+_CANDIDATE_CHARS = (
     "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
 )
 
@@ -53,8 +53,14 @@ CHAR_ASPECT_RATIO = 0.45
 DEFAULT_WIDTH = 100
 
 # Preprocessing strengths (1.0 = no change)
-CONTRAST_FACTOR  = 1.5   # boost contrast so dark/light areas are more distinct
-SHARPNESS_FACTOR = 2.0   # accentuate edges and fine details
+CONTRAST_FACTOR  = 1.3   # gentler now that histogram EQ handles dynamic range
+SHARPNESS_FACTOR = 1.5   # gentler with edge overlay doing the heavy lifting
+
+# Gamma correction for brightness mapping (< 1.0 = more shadow detail).
+GAMMA = 0.6
+
+# Edge-overlay blend strength (0.0 = no edges, 1.0 = full edge image).
+EDGE_BLEND = 0.15
 
 # Font size (pixels) used when rendering ASCII art to a JPG image.
 FONT_SIZE = 12
@@ -67,6 +73,45 @@ _FONT_CANDIDATES = [
     "C:/Windows/Fonts/consola.ttf",               # Windows
     "C:/Windows/Fonts/cour.ttf",                  # Windows fallback
 ]
+
+
+# ---------------------------------------------------------------------------
+# Auto-measured density ramp
+# ---------------------------------------------------------------------------
+
+def _measure_char_density(char: str, font: "ImageFont.FreeTypeFont | ImageFont.ImageFont") -> float:
+    """
+    Render `char` in `font` onto a small canvas and return the fraction of
+    non-zero ("ink") pixels.  Higher = visually denser.
+    """
+    size = 20
+    img = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(img).text((2, 2), char, fill=255, font=font)
+    pixels = list(img.getdata())
+    return sum(1 for p in pixels if p > 30) / len(pixels)
+
+
+def _build_density_ramp(candidates: str) -> str:
+    """
+    Sort `candidates` by measured ink-density (densest first) using the first
+    available monospace font.  Falls back to the original order if no font
+    can be loaded.
+    """
+    for path in _FONT_CANDIDATES:
+        if os.path.isfile(path):
+            try:
+                font = ImageFont.truetype(path, 14)
+                densities = [(ch, _measure_char_density(ch, font)) for ch in dict.fromkeys(candidates)]
+                densities.sort(key=lambda t: -t[1])   # densest first
+                return "".join(ch for ch, _ in densities)
+            except Exception:
+                pass
+    # Fallback: keep the manually-curated order
+    return candidates
+
+
+# Build the ramp once at import time.
+DEFAULT_CHARS = _build_density_ramp(_CANDIDATE_CHARS)
 
 # Folder (relative to this script) where outputs are auto-saved.
 RECEIVED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "received")
@@ -195,11 +240,15 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     """
     Enhance the image before ASCII conversion to bring out more detail.
 
-    Steps
-    -----
-    1. Sharpen edges with an unsharp-mask filter.
-    2. Boost contrast so the brightness range is wider, giving more distinct
-       mapping across the ASCII character set.
+    Pipeline
+    --------
+    1. Histogram equalization   — spread intensity across the full 0-255 range.
+    2. Auto-contrast (1% clip)  — remove extreme outlier pixels.
+    3. Unsharp-mask sharpening  — emphasize fine textures.
+    4. Contrast boost           — widen light/dark separation.
+    5. Sharpness boost          — final crispness pass.
+    6. Edge overlay             — blend a faint edge map to make object
+                                  boundaries pop in the ASCII output.
 
     Parameters
     ----------
@@ -211,12 +260,41 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     PIL.Image.Image
         The pre-processed image.
     """
-    # Unsharp mask: radius=2, percent=150, threshold=3
+    # 1. Histogram equalization (works on each channel independently)
+    img = ImageOps.equalize(img)
+
+    # 2. Clip extreme 1% of pixel values on each end
+    img = ImageOps.autocontrast(img, cutoff=1)
+
+    # 3. Unsharp mask: radius=2, percent=150, threshold=3
     img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-    # Contrast boost
+
+    # 4. Contrast boost
     img = ImageEnhance.Contrast(img).enhance(CONTRAST_FACTOR)
-    # Sharpness boost
+
+    # 5. Sharpness boost
     img = ImageEnhance.Sharpness(img).enhance(SHARPNESS_FACTOR)
+
+    # 6. Edge overlay — blend a faint edge-detection layer to accent boundaries
+    if EDGE_BLEND > 0:
+        from PIL import ImageChops
+        gray_for_edges = img.convert("L")
+        edges = gray_for_edges.filter(ImageFilter.FIND_EDGES)
+        # Blend the edge map into the base grayscale
+        blended_gray = Image.blend(gray_for_edges, edges, EDGE_BLEND)
+        # Compute the edge delta (what changed) as a single-channel image
+        edge_delta = ImageChops.subtract(blended_gray, gray_for_edges)
+
+        if img.mode == "RGB":
+            # Add the edge highlights to each channel
+            r_ch, g_ch, b_ch = img.split()
+            r_ch = ImageChops.add(r_ch, edge_delta)
+            g_ch = ImageChops.add(g_ch, edge_delta)
+            b_ch = ImageChops.add(b_ch, edge_delta)
+            img = Image.merge("RGB", (r_ch, g_ch, b_ch))
+        else:
+            img = blended_gray
+
     return img
 
 
@@ -318,9 +396,12 @@ def pixel_to_ascii(pixel_value: int, char_set: str) -> str:
     str
         A single ASCII character.
     """
-    # Scale pixel value to an index within the character set
-    index = int(pixel_value / 255 * (len(char_set) - 1))
-    return char_set[index]
+    # Gamma-corrected mapping: raises the normalized brightness to GAMMA
+    # power, expanding the shadow range where human eyes are most sensitive.
+    normalized = pixel_value / 255.0
+    corrected  = normalized ** GAMMA
+    index = int(corrected * (len(char_set) - 1))
+    return char_set[min(index, len(char_set) - 1)]
 
 
 def image_to_ascii(gray_img: Image.Image, char_set: str) -> list[str]:
